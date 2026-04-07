@@ -10,6 +10,7 @@ import json
 import argparse
 import sys
 import base64
+import math
 from pathlib import Path
 
 import fitz
@@ -92,11 +93,11 @@ IMPORTANT:
 
 FIGURE_PROMPT = """
 The following images are pages from a research paper containing figures, charts, and tables.
-Extract all numerical results, endpoint names, and data visible in these figures.
+Extract all numerical results, endpoint names, and model performance data visible in these figures.
 Return a JSON object with this schema — no markdown fences, just raw JSON:
 
 {
-  "endpoints_from_figures": ["every endpoint name visible in any figure or table"],
+  "endpoints_from_figures": ["every ADMET prediction endpoint name visible in any figure or table"],
   "benchmark_results_from_figures": [
     {
       "endpoint": "string",
@@ -108,6 +109,17 @@ Return a JSON object with this schema — no markdown fences, just raw JSON:
   ],
   "figure_notes": ["any important methodological details visible only in figures/captions"]
 }
+
+STRICT RULES:
+- endpoints_from_figures: only include molecular property or toxicity endpoint names such as
+  hERG, Caco-2, BBB, AMES, DILI, CYP3A4, VDss, logD, solubility, clearance, half-life, etc.
+  Use the exact name as it appears in the figure (e.g. "Bioavailability_Ma", "HIA_Hou").
+- Do NOT include ATC drug category names such as "CARDIOVASCULAR SYSTEM", "NERVOUS SYSTEM",
+  "ANTIBACTERIALS FOR SYSTEMIC USE", or any other all-caps therapeutic category labels.
+- benchmark_results_from_figures: only include model performance metrics (AUROC, MAE, R2,
+  AUPRC, Spearman) for ADMET prediction tasks. Do NOT include frequency counts, drug counts,
+  or bar chart values from reference set distribution figures (e.g. DrugBank ATC code charts).
+- If a figure shows only reference set demographics or drug category distributions, skip it entirely.
 """
 
 
@@ -137,17 +149,18 @@ def rasterize_figure_pages(pdf_path: str, page_range: tuple[int, int] | None = N
     total_pages = len(doc)
     start = (page_range[0] - 1) if page_range else 0
     end = page_range[1] if page_range else total_pages
+    scoped_total = end - start
+
+    cutoff = start + math.floor(scoped_total * 0.7)
 
     figure_pages = []
     mat = fitz.Matrix(dpi / 72, dpi / 72)
 
-    for i in range(start, min(end, total_pages)):
+    for i in range(cutoff, min(end, total_pages)):
         page = doc[i]
-        text = page.get_text().strip()
-        if len(text) < 500:
-            pix = page.get_pixmap(matrix=mat)
-            img_bytes = pix.tobytes("jpeg")
-            figure_pages.append(base64.b64encode(img_bytes).decode("utf-8"))
+        pix = page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("jpeg")
+        figure_pages.append(base64.b64encode(img_bytes).decode("utf-8"))
 
     doc.close()
     return figure_pages
@@ -177,12 +190,26 @@ async def extract_figures(figure_images: list[str]) -> dict:
         return {"figure_parse_error": raw[:500]}
 
 
+KNOWN_CORRECTIONS = {
+    "Bioavailability_Ha": "Bioavailability_Ma",
+}
+
+def _is_atc_noise(name: str) -> bool:
+    if name is None:
+        return False
+    stripped = name.strip()
+    return stripped == stripped.upper() and len(stripped.split()) > 1
+
+
 def merge_figure_data(result: dict, figure_data: dict) -> dict:
     if not figure_data or "figure_parse_error" in figure_data:
         return result
 
     existing_endpoints = set(result.get("admet_endpoints_covered", []))
     for ep in figure_data.get("endpoints_from_figures", []):
+        if _is_atc_noise(ep):
+            continue
+        ep = KNOWN_CORRECTIONS.get(ep, ep)
         if ep not in existing_endpoints:
             result["admet_endpoints_covered"].append(ep)
             existing_endpoints.add(ep)
@@ -191,11 +218,16 @@ def merge_figure_data(result: dict, figure_data: dict) -> dict:
         (b["endpoint"], b["metric"]) for b in result.get("benchmark_results", [])
     }
     for b in figure_data.get("benchmark_results_from_figures", []):
-        key = (b.get("endpoint"), b.get("metric"))
+        endpoint = b.get("endpoint")
+        metric = b.get("metric")
+        if _is_atc_noise(endpoint) or metric == "Frequency":
+            continue
+        endpoint = KNOWN_CORRECTIONS.get(endpoint, endpoint)
+        key = (endpoint, metric)
         if key not in existing_benchmarks:
             result["benchmark_results"].append({
-                "endpoint": b.get("endpoint"),
-                "metric": b.get("metric"),
+                "endpoint": endpoint,
+                "metric": metric,
                 "value": b.get("value"),
                 "dataset": b.get("dataset"),
                 "baseline_comparison": b.get("notes"),
