@@ -10,7 +10,6 @@ import json
 import argparse
 import sys
 import base64
-import math
 from pathlib import Path
 
 import fitz
@@ -47,10 +46,10 @@ Return EXACTLY this schema (use null for missing fields, [] for empty lists):
       "name": "string",
       "source": "string or null  (e.g. TDC, ChEMBL, PubChem)",
       "split_strategy": "string or null  (e.g. scaffold, random)",
-      "size": "integer or null"
+      "size": "integer or null  (number of molecules/compounds — NOT the number of datasets; use null if molecule count is not stated)"
     }
   ],
-  "external_data_sources": ["string"],
+  "external_data_sources": ["string — databases or datasets directly used in THIS study for training, validation, evaluation, OR as a reference/inference set. Do NOT include sources merely cited in background, introduction, or related work."],
   "molecular_representations": [
     {
       "type": "string  (e.g. ECFP4, MACCS, graph, 3D, Uni-Mol)",
@@ -70,9 +69,9 @@ Return EXACTLY this schema (use null for missing fields, [] for empty lists):
     {
       "endpoint": "string",
       "metric": "string  (e.g. AUC-ROC, RMSE, MAE, R2)",
-      "value": "number or null",
+      "value": "number or null — use the PRIMARY reported value (e.g. TDC-reported/submitted score). If the paper also gives a reproduced value, put it in baseline_comparison, not here.",
       "dataset": "string or null",
-      "baseline_comparison": "string or null"
+      "baseline_comparison": "string or null — include model name, rank, reproduced value, or any comparison context. If the value is null because results are in a supplementary table or external source, write e.g. 'ADMET-AI TDC Leaderboard result; see Supplementary Table 1' rather than leaving this null."
     }
   ],
   "key_findings": ["string  (1-2 sentence bullet points)"],
@@ -84,7 +83,7 @@ Return EXACTLY this schema (use null for missing fields, [] for empty lists):
 
 IMPORTANT:
 - Extract only what is explicitly stated in the text or figures. Do not hallucinate.
-- For admet_endpoints_covered, list every single endpoint name you encounter anywhere — in tables, figures, supplementary sections, or body text.
+- For admet_endpoints_covered, only include names that appear VERBATIM in the paper text or figure labels. Prefer the canonical TDC dataset name (e.g. "caco2_wang", "herg", "half_life_obach") over abbreviations. Do NOT include general biological concepts (e.g. "toxicity", "oral bioavailability", "logD"), do NOT paraphrase endpoint names, and do NOT invent or conflate names that do not appear exactly in the source. Do NOT include endpoints the paper explicitly states were excluded, not used, or treated as redundant.
 - For benchmark_results, capture every reported number you can find including from figures and charts.
 - For negative_findings, actively look for: limitations sections, caveats, scaffold leakage warnings, overfitting risks, dataset bias mentions, failure modes, and any result described as worse or unexpected.
 - For hyperparameters.other, include training configuration details like number of splits, ensemble size, or random seeds even if LR/batch/dropout are not reported.
@@ -107,8 +106,14 @@ Return a JSON object with this schema — no markdown fences, just raw JSON:
       "notes": "string or null"
     }
   ],
-  "figure_notes": ["any important methodological details visible only in figures/captions"]
+  "figure_notes": ["verbatim or close paraphrase of figure captions that contain important methodological details. Do NOT rephrase or reinterpret — quote the caption as written."]
 }
+
+TDC STANDARD METRICS — use these unless the figure caption explicitly states otherwise:
+- MAE: Caco2, Lipophilicity, Solubility, PPBR, LD50
+- Spearman: VDss, Half_Life, Clearance_Hepatocyte, Clearance_Microsome
+- AUROC: hERG, AMES, DILI, BBB, HIA, Bioavailability, Pgp, CYP3A4_Substrate
+- AUPRC: CYP2C9_Veith, CYP2D6_Veith, CYP3A4_Veith, CYP1A2_Veith, CYP2C19_Veith, CYP2C9_Substrate, CYP2D6_Substrate, CYP2C19_Substrate, CYP1A2_Substrate
 
 STRICT RULES:
 - endpoints_from_figures: only include molecular property or toxicity endpoint names such as
@@ -120,6 +125,10 @@ STRICT RULES:
   AUPRC, Spearman) for ADMET prediction tasks. Do NOT include frequency counts, drug counts,
   or bar chart values from reference set distribution figures (e.g. DrugBank ATC code charts).
 - If a figure shows only reference set demographics or drug category distributions, skip it entirely.
+- For value, use the TDC-reported/submitted score. If a figure shows both a reported and a reproduced
+  value, put the reported value in value and describe the reproduced value in notes.
+- Set dataset to "TDC" for any result from TDC leaderboard figures.
+- CRITICAL: Only extract values that are explicitly labeled with a precise number in the figure (e.g. in a table cell, axis tick, or data label). Do NOT estimate or read approximate positions off scatter plots or bar charts — if a value is not precisely labeled, set value to null rather than guessing. Round numbers like 0.5, 0.7, 0.9 are a red flag that you are guessing.
 """
 
 
@@ -149,15 +158,14 @@ def rasterize_figure_pages(pdf_path: str, page_range: tuple[int, int] | None = N
     total_pages = len(doc)
     start = (page_range[0] - 1) if page_range else 0
     end = page_range[1] if page_range else total_pages
-    scoped_total = end - start
-
-    cutoff = start + math.floor(scoped_total * 0.7)
 
     figure_pages = []
     mat = fitz.Matrix(dpi / 72, dpi / 72)
 
-    for i in range(cutoff, min(end, total_pages)):
+    for i in range(start, min(end, total_pages)):
         page = doc[i]
+        if not page.get_images(full=False):
+            continue
         pix = page.get_pixmap(matrix=mat)
         img_bytes = pix.tobytes("jpeg")
         figure_pages.append(base64.b64encode(img_bytes).decode("utf-8"))
@@ -192,7 +200,76 @@ async def extract_figures(figure_images: list[str]) -> dict:
 
 KNOWN_CORRECTIONS = {
     "Bioavailability_Ha": "Bioavailability_Ma",
+    "Pgp_Brocateelli": "Pgp_Broccatelli",
+    "Pgp_Brocatelli": "Pgp_Broccatelli",
+    "Pgp_Boccatelli": "Pgp_Broccatelli",
+    "Skin_Reaction_Ma": "Skin_Reaction",
+    "Skin_Sensitization": "Skin_Reaction",
 }
+
+# Maps paper abbreviations and known pdfplumber garbles → canonical TDC endpoint names (lowercase keys).
+ENDPOINT_ALIASES = {
+    "caco2": "caco2_wang",
+    "caco-2": "caco2_wang",
+    "lipo": "lipophilicity_astrazeneca",
+    "lipophilicity": "lipophilicity_astrazeneca",
+    "solu": "solubility_aqsoldb",
+    "solubility": "solubility_aqsoldb",
+    "hia": "hia_hou",
+    "pgp": "pgp_broccatelli",
+    "bbb": "bbb_martins",
+    "ppbr": "ppbr_az",
+    "vdss": "vdss_lombardo",
+    "half": "half_life_obach",
+    "half_life": "half_life_obach",
+    "bio": "bioavailability_ma",
+    "bioavailability": "bioavailability_ma",
+    "ld50": "ld50_zhu",
+    "ld50_zh": "ld50_zhu",
+    "clearance_hepa": "clearance_hepatocyte_az",
+    "clearence_hepa": "clearance_hepatocyte_az",
+    "clearenc_e_hepa": "clearance_hepatocyte_az",
+    "clearance_micro": "clearance_microsome_az",
+    "clearence_micro": "clearance_microsome_az",
+    "clearenc_e_micro": "clearance_microsome_az",
+    "cyp2d6_sub": "cyp2d6_substrate_carbonmangels",
+    "cyp3a4_sub": "cyp3a4_substrate_carbonmangels",
+    "cyp2c9_sub": "cyp2c9_substrate_carbonmangels",
+    "cyp2c19_sub": "cyp2c19_substrate_carbonmangels",
+    "cyp1a2_sub": "cyp1a2_substrate_carbonmangels",
+}
+
+# TDC standard metrics per endpoint (lowercase keys). Used to correct figure extraction errors.
+KNOWN_ENDPOINT_METRICS = {
+    "caco2_wang": "MAE",
+    "lipophilicity_astrazeneca": "MAE",
+    "solubility_aqsoldb": "MAE",
+    "ppbr_az": "MAE",
+    "ld50_zhu": "MAE",
+    "vdss_lombardo": "Spearman",
+    "half_life_obach": "Spearman",
+    "clearance_hepatocyte_az": "Spearman",
+    "clearance_microsome_az": "Spearman",
+    "bioavailability_ma": "AUROC",
+    "hia_hou": "AUROC",
+    "pgp_broccatelli": "AUROC",
+    "pgp_brocattelli": "AUROC",
+    "bbb_martins": "AUROC",
+    "herg": "AUROC",
+    "ames": "AUROC",
+    "dili": "AUROC",
+    "cyp3a4_substrate_carbonmangels": "AUROC",
+    "cyp2c9_veith": "AUPRC",
+    "cyp2d6_veith": "AUPRC",
+    "cyp3a4_veith": "AUPRC",
+    "cyp1a2_veith": "AUPRC",
+    "cyp2c19_veith": "AUPRC",
+    "cyp2c9_substrate_carbonmangels": "AUPRC",
+    "cyp2d6_substrate_carbonmangels": "AUPRC",
+    "cyp2c19_substrate_carbonmangels": "AUPRC",
+    "cyp1a2_substrate_carbonmangels": "AUPRC",
+}
+
 
 def _is_atc_noise(name: str) -> bool:
     if name is None:
@@ -204,18 +281,21 @@ def _is_atc_noise(name: str) -> bool:
 def merge_figure_data(result: dict, figure_data: dict) -> dict:
     if not figure_data or "figure_parse_error" in figure_data:
         return result
+    if "parse_error" in result:
+        return result
 
-    existing_endpoints = set(result.get("admet_endpoints_covered", []))
+    existing_endpoints_lower = {e.lower() for e in result.get("admet_endpoints_covered", [])}
     for ep in figure_data.get("endpoints_from_figures", []):
         if _is_atc_noise(ep):
             continue
         ep = KNOWN_CORRECTIONS.get(ep, ep)
-        if ep not in existing_endpoints:
+        ep = ENDPOINT_ALIASES.get(ep.lower(), ep)
+        if ep.lower() not in existing_endpoints_lower:
             result["admet_endpoints_covered"].append(ep)
-            existing_endpoints.add(ep)
+            existing_endpoints_lower.add(ep.lower())
 
     existing_benchmarks = {
-        (b["endpoint"], b["metric"]) for b in result.get("benchmark_results", [])
+        (b["endpoint"].lower(), b["metric"]) for b in result.get("benchmark_results", [])
     }
     for b in figure_data.get("benchmark_results_from_figures", []):
         endpoint = b.get("endpoint")
@@ -223,7 +303,8 @@ def merge_figure_data(result: dict, figure_data: dict) -> dict:
         if _is_atc_noise(endpoint) or metric == "Frequency":
             continue
         endpoint = KNOWN_CORRECTIONS.get(endpoint, endpoint)
-        key = (endpoint, metric)
+        endpoint = ENDPOINT_ALIASES.get(endpoint.lower(), endpoint)
+        key = (endpoint.lower(), metric)
         if key not in existing_benchmarks:
             result["benchmark_results"].append({
                 "endpoint": endpoint,
@@ -236,6 +317,39 @@ def merge_figure_data(result: dict, figure_data: dict) -> dict:
 
     if figure_data.get("figure_notes"):
         result.setdefault("figure_notes", []).extend(figure_data["figure_notes"])
+
+    return result
+
+
+def normalize_result(result: dict) -> dict:
+    # Resolve corrections and aliases, then deduplicate admet_endpoints_covered case-insensitively.
+    seen_lower = set()
+    deduped = []
+    for ep in result.get("admet_endpoints_covered", []):
+        ep = ep.strip()
+        ep = KNOWN_CORRECTIONS.get(ep, ep)
+        canonical = ENDPOINT_ALIASES.get(ep.lower(), ep)
+        canonical_key = canonical.lower()
+        if canonical_key not in seen_lower:
+            seen_lower.add(canonical_key)
+            deduped.append(canonical)
+    result["admet_endpoints_covered"] = deduped
+
+    # Resolve corrections and aliases, correct metrics, then deduplicate benchmark_results.
+    seen_benchmarks = set()
+    deduped_benchmarks = []
+    for b in result.get("benchmark_results", []):
+        ep_raw = (b.get("endpoint") or "").strip()
+        ep_raw = KNOWN_CORRECTIONS.get(ep_raw, ep_raw)
+        canonical = ENDPOINT_ALIASES.get(ep_raw.lower(), ep_raw)
+        b["endpoint"] = canonical
+        if canonical.lower() in KNOWN_ENDPOINT_METRICS:
+            b["metric"] = KNOWN_ENDPOINT_METRICS[canonical.lower()]
+        key = (canonical.lower(), b.get("metric"), str(b.get("value")), str(b.get("baseline_comparison")))
+        if key not in seen_benchmarks:
+            seen_benchmarks.add(key)
+            deduped_benchmarks.append(b)
+    result["benchmark_results"] = deduped_benchmarks
 
     return result
 
@@ -288,6 +402,7 @@ PAPER TEXT:
         result = {"parse_error": str(e), "raw_output": raw_output}
 
     result = merge_figure_data(result, figure_data)
+    result = normalize_result(result)
 
     result["_meta"] = {
         "source_file": path.name,
