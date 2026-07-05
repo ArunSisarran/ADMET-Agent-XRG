@@ -20,12 +20,18 @@ from langsmith import traceable
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from candidates import Candidate, dedupe_key
+from gemini_backoff import ainvoke_with_backoff
+import manifest as manifest_store
+
 load_dotenv()
 
 model = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0,
 )
+
+MIN_TEXT_CHARS = 100
 
 SYSTEM_PROMPT = """
 You are a scientific information extraction assistant specialised in
@@ -177,7 +183,7 @@ async def extract_figures(figure_images: list[str]) -> dict:
             "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
         })
 
-    response = await model.ainvoke([HumanMessage(content=content)])
+    response = await ainvoke_with_backoff(model, [HumanMessage(content=content)])
     raw = response.content.strip()
 
     if raw.startswith("```"):
@@ -251,8 +257,19 @@ async def extract_knowledge(pdf_path: str, page_range: tuple[int, int] | None = 
     page_info = f"pages {page_range[0]}-{page_range[1]}" if page_range else f"all {total_pages} pages"
     char_count = len(raw_text)
 
-    if char_count < 100:
-        print("WARNING: Very little text extracted — PDF may be scanned/image-based.")
+    if char_count < MIN_TEXT_CHARS:
+        print("WARNING: Very little text extracted — PDF is likely scanned/image-based. Skipping Gemini extraction.")
+        return {
+            "skipped": "text_extraction_failed",
+            "_meta": {
+                "source_file": path.name,
+                "pages_processed": page_info,
+                "total_pages": total_pages,
+                "chars_extracted": char_count,
+                "figure_pages_rasterized": 0,
+                "model": "gemini-2.5-flash",
+            },
+        }
 
     MAX_CHARS = 80_000
     if char_count > MAX_CHARS:
@@ -269,7 +286,7 @@ PAPER TEXT:
 {raw_text}
 """
 
-    text_task = model.ainvoke([
+    text_task = ainvoke_with_backoff(model, [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=user_message),
     ])
@@ -329,6 +346,25 @@ async def main() -> None:
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     print(f"\nSaved to: {output_path}\n")
+
+    title = result.get("title") or Path(args.pdf).stem
+    if result.get("skipped"):
+        status = result["skipped"]
+    elif "parse_error" in result:
+        status = "error"
+    else:
+        status = "extracted"
+
+    key = dedupe_key(Candidate(title=title, source="manual", source_type="unknown"))
+    manifest_store.record(
+        manifest_store.load(),
+        key,
+        status,
+        title=title,
+        source="manual",
+        source_type="unknown",
+        extracted_file=output_path,
+    )
 
 
 if __name__ == "__main__":
