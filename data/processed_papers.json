@@ -1,0 +1,13 @@
+{
+  "doi:10.64898/2026.05.06.723181": {
+    "doi": "10.64898/2026.05.06.723181",
+    "extracted_file": null,
+    "filter_version": "v1",
+    "reason": "download_failed",
+    "source": "europepmc",
+    "source_type": "preprint",
+    "status": "skipped_no_oa_pdf",
+    "title": "CardioSafe: Multi-task prediction of cardiac ion channel activity with reverse-leak audited benchmarking",
+    "updated_at": "2026-07-05T07:16:31.539850+00:00"
+  }
+}

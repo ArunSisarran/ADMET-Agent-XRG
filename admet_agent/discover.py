@@ -5,19 +5,20 @@ Searches free/open-access sources for papers matching a seed list of ADMET
 topics, filters out irrelevant results cheaply (title/abstract only), resolves
 a legal open-access PDF for anything that passes, and runs it through the
 existing knowledge_extractor.extract_knowledge() pipeline. See
-PAPER_DISCOVERY_PLAN.md for the full design rationale.
+docs/PAPER_DISCOVERY_PLAN.md for the full design rationale.
 
-Usage:
-    python discover.py
-    python discover.py --topics "hERG inhibition,CYP450 inhibition"
-    python discover.py --sources europepmc,arxiv
-    python discover.py --max-papers 10
-    python discover.py --dry-run
+Usage (run from the repo root):
+    python admet_agent/discover.py
+    python admet_agent/discover.py --topics "hERG inhibition,CYP450 inhibition"
+    python admet_agent/discover.py --sources europepmc,arxiv
+    python admet_agent/discover.py --max-papers 10
+    python admet_agent/discover.py --dry-run
 """
 
 import argparse
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -33,13 +34,19 @@ from sources import ALL_SOURCES, DEFAULT_HEADERS
 
 load_dotenv()
 
-SEED_TOPICS_PATH = Path(__file__).parent / "seed_topics.json"
-DOWNLOAD_DIR = Path(__file__).parent / "downloaded_papers"
-EXTRACTED_DIR = Path(__file__).parent / "discovered_extractions"
-INDEX_PATH = Path(__file__).parent / "knowledge_base_index.json"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SEED_TOPICS_PATH = REPO_ROOT / "config" / "seed_topics.json"
+DOWNLOAD_DIR = REPO_ROOT / "data" / "downloaded_papers"
+EXTRACTED_DIR = REPO_ROOT / "data" / "discovered_extractions"
+INDEX_PATH = REPO_ROOT / "data" / "knowledge_base_index.json"
 
 SOURCE_DELAY_SECONDS = 0.5  # politeness delay between source-API calls
 GEMINI_PACE_SECONDS = 13  # free tier is 5 req/min for gemini-2.5-flash (~12s/req); pace proactively rather than relying only on 429 backoff
+
+
+def safe_filename(key: str) -> str:
+    """DOIs routinely contain '/', which would otherwise be read as a path separator."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", key)
 
 
 def load_seed_topics() -> list[str]:
@@ -58,6 +65,7 @@ def download_pdf(url: str, dest_path: Path) -> bool:
 
 
 def update_index(entry: dict) -> None:
+    INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
     index = []
     if INDEX_PATH.exists():
         with open(INDEX_PATH, "r", encoding="utf-8") as f:
@@ -132,7 +140,7 @@ async def run_discovery(topics: list[str], source_names: list[str], max_results_
             continue
 
         DOWNLOAD_DIR.mkdir(exist_ok=True)
-        dest = DOWNLOAD_DIR / f"{key.replace(':', '_')}.pdf"
+        dest = DOWNLOAD_DIR / f"{safe_filename(key)}.pdf"
         if not download_pdf(pdf_url, dest):
             print(f"  SKIPPED (PDF download failed)")
             manifest_store.record(
@@ -160,7 +168,7 @@ async def run_discovery(topics: list[str], source_names: list[str], max_results_
         result["_meta"]["landing_url"] = candidate.landing_url
 
         EXTRACTED_DIR.mkdir(exist_ok=True)
-        extracted_path = EXTRACTED_DIR / f"{key.replace(':', '_')}_extracted.json"
+        extracted_path = EXTRACTED_DIR / f"{safe_filename(key)}_extracted.json"
         with open(extracted_path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
 

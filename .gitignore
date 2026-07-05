@@ -2,4 +2,4 @@
 __pycache__/
 *.pyc
 .venv/
-downloaded_papers/
+data/downloaded_papers/
