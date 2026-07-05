@@ -1,0 +1,7 @@
+PyMuPDF
+pdfplumber
+python-dotenv
+langsmith
+langchain-google-genai
+langchain-core
+requests
