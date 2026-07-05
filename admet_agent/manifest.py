@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-MANIFEST_PATH = Path(__file__).parent / "processed_papers.json"
+MANIFEST_PATH = Path(__file__).resolve().parent.parent / "data" / "processed_papers.json"
 
 # Bump this when the relevance-filter prompt changes meaningfully, so stale
 # rejections made under an older prompt can be identified and re-checked
@@ -29,6 +29,7 @@ def load() -> dict:
 
 
 def save(manifest: dict) -> None:
+    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False, sort_keys=True)
 

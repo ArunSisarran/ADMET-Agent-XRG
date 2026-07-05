@@ -1,8 +1,8 @@
 """
-Usage:
-    python knowledge_extractor.py paper.pdf
-    python knowledge_extractor.py paper.pdf --output results.json
-    python knowledge_extractor.py paper.pdf --pages 1-5
+Usage (run from the repo root):
+    python admet_agent/knowledge_extractor.py paper.pdf
+    python admet_agent/knowledge_extractor.py paper.pdf --output results.json
+    python admet_agent/knowledge_extractor.py paper.pdf --pages 1-5
 """
 
 import asyncio
