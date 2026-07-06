@@ -349,7 +349,7 @@ def normalize_result(result: dict) -> dict:
         ep_raw = KNOWN_CORRECTIONS.get(ep_raw, ep_raw)
         canonical = ENDPOINT_ALIASES.get(ep_raw.lower(), ep_raw)
         b["endpoint"] = canonical
-        if canonical.lower() in KNOWN_ENDPOINT_METRICS:
+        if not b.get("metric") and canonical.lower() in KNOWN_ENDPOINT_METRICS:
             b["metric"] = KNOWN_ENDPOINT_METRICS[canonical.lower()]
         key = (canonical.lower(), b.get("metric"), str(b.get("value")), str(b.get("baseline_comparison")))
         if key not in seen_benchmarks:
