@@ -89,7 +89,7 @@ Return EXACTLY this schema (use null for missing fields, [] for empty lists):
 
 IMPORTANT:
 - Extract only what is explicitly stated in the text or figures. Do not hallucinate.
-- For admet_endpoints_covered, only include names that appear VERBATIM in the paper text or figure labels. Prefer the canonical TDC dataset name (e.g. "caco2_wang", "herg", "half_life_obach") over abbreviations. Do NOT include general biological concepts (e.g. "toxicity", "oral bioavailability", "logD"), do NOT paraphrase endpoint names, and do NOT invent or conflate names that do not appear exactly in the source. Do NOT include endpoints the paper explicitly states were excluded, not used, or treated as redundant.
+- For admet_endpoints_covered, only include endpoints this paper actually modeled, measured, or reported results for — i.e. endpoints that appear in its datasets, models, tables, or figures of results. Do NOT include an endpoint just because its name appears somewhere in the text: papers routinely name many endpoints in the Introduction/background only as examples of a category (e.g. "distribution can be assessed via BBB permeability, plasma protein binding, and VDss") without actually using all of them. If the paper states it focuses on a specific subset (e.g. "one representative parameter from each category" or "N endpoints"), include ONLY that subset, not the other examples named around it. Names must still appear VERBATIM in the paper text or figure labels. Prefer the canonical TDC dataset name (e.g. "caco2_wang", "herg", "half_life_obach") over abbreviations. Do NOT include general biological concepts (e.g. "toxicity", "oral bioavailability", "logD"), do NOT paraphrase endpoint names, and do NOT invent or conflate names that do not appear exactly in the source. Do NOT include endpoints the paper explicitly states were excluded, not used, or treated as redundant.
 - For benchmark_results, capture every reported number you can find including from figures and charts.
 - For negative_findings, actively look for: limitations sections, caveats, scaffold leakage warnings, overfitting risks, dataset bias mentions, failure modes, and any result described as worse or unexpected.
 - For hyperparameters.other, include training configuration details like number of splits, ensemble size, or random seeds even if LR/batch/dropout are not reported.
@@ -112,29 +112,45 @@ Return a JSON object with this schema — no markdown fences, just raw JSON:
       "notes": "string or null"
     }
   ],
-  "figure_notes": ["verbatim or close paraphrase of figure captions that contain important methodological details. Do NOT rephrase or reinterpret — quote the caption as written."]
+  "figure_notes": ["verbatim or close paraphrase of figure captions that contain important methodological details. Do NOT rephrase or reinterpret — quote the caption as written. Only include words, sentences, and details that actually appear in that figure's caption. Do NOT pull in sentences from the surrounding body text, and do NOT add experimental conditions, pretreatment details, sample sizes, or replicate/experiment counts that are not printed in the caption itself, even if they seem plausible or you recall a number from elsewhere in the paper — if the caption just says 'independent experiments' with no number, write it that way rather than filling in a number. When an abbreviation is expanded elsewhere in the paper (e.g. FPDc = corrected field potential duration), use that exact expansion, not a guessed one."]
 }
 
-TDC STANDARD METRICS — use these unless the figure caption explicitly states otherwise:
-- MAE: Caco2, Lipophilicity, Solubility, PPBR, LD50
-- Spearman: VDss, Half_Life, Clearance_Hepatocyte, Clearance_Microsome
-- AUROC: hERG, AMES, DILI, BBB, HIA, Bioavailability, Pgp, CYP3A4_Substrate
-- AUPRC: CYP2C9_Veith, CYP2D6_Veith, CYP3A4_Veith, CYP1A2_Veith, CYP2C19_Veith, CYP2C9_Substrate, CYP2D6_Substrate, CYP2C19_Substrate, CYP1A2_Substrate
-
 STRICT RULES:
-- endpoints_from_figures: only include molecular property or toxicity endpoint names such as
-  hERG, Caco-2, BBB, AMES, DILI, CYP3A4, VDss, logD, solubility, clearance, half-life, etc.
-  Use the exact name as it appears in the figure (e.g. "Bioavailability_Ma", "HIA_Hou").
+- endpoints_from_figures: only include the actual ADMET/pharmacological endpoint or biomarker
+  names being measured (e.g. hERG, Caco-2, half-life, VDss, qNet, FPDc) — NOT axis units or
+  legend/plot labels for concentration, dose, time, or condition (e.g. "Current (pA)",
+  "Time (ms)", "Sildenafil (µM)", "Concentration (nM)", "Block (%)", "Vehicle", "Cmax 50x",
+  "Control"). Only include a name if it individually appears as its own label in one of THESE
+  SPECIFIC images — never from general knowledge of what a typical ADMET/TDC study covers. Use
+  the exact name as it appears in the figure. Do NOT include generic ADMET process-category words
+  (Absorption, Distribution, Metabolism, Excretion, Toxicity, ADME, ADMET, PK) even when they
+  appear as section labels in a pipeline/workflow diagram — those are process categories, not
+  individually measured endpoints.
 - Do NOT include ATC drug category names such as "CARDIOVASCULAR SYSTEM", "NERVOUS SYSTEM",
   "ANTIBACTERIALS FOR SYSTEMIC USE", or any other all-caps therapeutic category labels.
-- benchmark_results_from_figures: only include model performance metrics (AUROC, MAE, R2,
-  AUPRC, Spearman) for ADMET prediction tasks. Do NOT include frequency counts, drug counts,
-  or bar chart values from reference set distribution figures (e.g. DrugBank ATC code charts).
+- benchmark_results_from_figures: only include model performance metrics (e.g. AUROC, MAE, R2,
+  AUPRC, Spearman correlation) for ADMET prediction tasks. Do NOT include frequency counts, drug
+  counts, or bar chart values from reference set distribution figures (e.g. DrugBank ATC code
+  charts).
 - If a figure shows only reference set demographics or drug category distributions, skip it entirely.
 - For value, use the TDC-reported/submitted score. If a figure shows both a reported and a reproduced
   value, put the reported value in value and describe the reproduced value in notes.
-- Set dataset to "TDC" for any result from TDC leaderboard figures.
+- Set dataset to "TDC" only when the specific figure/table is showing a result on the TDC dataset —
+  do not set it just because the paper uses TDC data elsewhere.
+- METRIC RULE: use only the metric name actually printed on the figure's axis label, legend, or
+  table header/column — transcribe it exactly as shown. If no metric is printed anywhere in the
+  image, set metric to null. Do NOT substitute a "conventional" TDC metric for a well-known
+  endpoint name from memory (e.g. do not assume hERG must be AUROC — some papers score it with
+  Spearman correlation or another metric instead). A separate code-level step already backfills
+  conventional TDC metrics after extraction when one is genuinely missing, so it is always safe
+  to leave metric null here rather than guess.
 - CRITICAL: Only extract values that are explicitly labeled with a precise number in the figure (e.g. in a table cell, axis tick, or data label). Do NOT estimate or read approximate positions off scatter plots or bar charts — if a value is not precisely labeled, set value to null rather than guessing. Round numbers like 0.5, 0.7, 0.9 are a red flag that you are guessing.
+- CRITICAL: Do NOT invent endpoints or results that are not visible in these specific images. A
+  paper mentioning or using "TDC" (Therapeutics Data Commons) does NOT mean it reports results for
+  every endpoint in the TDC ADMET benchmark suite — extract only the specific endpoints this
+  paper's own figures actually plot or tabulate. If you notice yourself about to output the same
+  metric value repeated across several different endpoints, stop and omit all of them — that
+  pattern means you are recalling a reference list from memory, not reading the image.
 """
 
 
@@ -303,6 +319,9 @@ def merge_figure_data(result: dict, figure_data: dict) -> dict:
     existing_benchmarks = {
         (b["endpoint"].lower(), b["metric"]) for b in result.get("benchmark_results", [])
     }
+    existing_benchmark_endpoints = {
+        b["endpoint"].lower() for b in result.get("benchmark_results", [])
+    }
     for b in figure_data.get("benchmark_results_from_figures", []):
         endpoint = b.get("endpoint")
         metric = b.get("metric")
@@ -310,16 +329,25 @@ def merge_figure_data(result: dict, figure_data: dict) -> dict:
             continue
         endpoint = KNOWN_CORRECTIONS.get(endpoint, endpoint)
         endpoint = ENDPOINT_ALIASES.get(endpoint.lower(), endpoint)
+        value = b.get("value")
+        # A null-value figure result for an endpoint that already has a real
+        # extracted number adds no information and only risks tagging on a
+        # mis-guessed metric (e.g. TDC-conventional AUROC/MAE guessed by the
+        # figure pass for a paper that actually reported Spearman/AUPRC) —
+        # skip it rather than let it survive as contradictory noise.
+        if value is None and endpoint.lower() in existing_benchmark_endpoints:
+            continue
         key = (endpoint.lower(), metric)
         if key not in existing_benchmarks:
             result["benchmark_results"].append({
                 "endpoint": endpoint,
                 "metric": metric,
-                "value": b.get("value"),
+                "value": value,
                 "dataset": b.get("dataset"),
                 "baseline_comparison": b.get("notes"),
             })
             existing_benchmarks.add(key)
+            existing_benchmark_endpoints.add(endpoint.lower())
 
     if figure_data.get("figure_notes"):
         result.setdefault("figure_notes", []).extend(figure_data["figure_notes"])
