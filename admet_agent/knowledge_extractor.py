@@ -8,6 +8,7 @@ Usage (run from the repo root):
 import asyncio
 import json
 import argparse
+import re
 import sys
 import base64
 from pathlib import Path
@@ -261,6 +262,18 @@ ENDPOINT_ALIASES = {
     "cyp1a2_sub": "cyp1a2_substrate_carbonmangels",
 }
 
+def _endpoint_key(name: str) -> str:
+    """Alphanumeric-only, lowercased identity for an endpoint name.
+
+    Gemini's raw extractions vary run-to-run in separator style for the same
+    endpoint ("Half-Life" / "Half Life" / "half_life", "LogP" / "Log P"), which
+    a plain .lower() dedup/alias lookup treats as distinct strings. Stripping
+    all non-alphanumeric characters collapses those variants onto one key so
+    ENDPOINT_ALIASES lookups and dedup both catch them.
+    """
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
 # TDC standard metrics per endpoint (lowercase keys). Used to correct figure extraction errors.
 KNOWN_ENDPOINT_METRICS = {
     "caco2_wang": "MAE",
@@ -292,6 +305,12 @@ KNOWN_ENDPOINT_METRICS = {
     "cyp1a2_substrate_carbonmangels": "AUPRC",
 }
 
+# Same-content lookups as ENDPOINT_ALIASES / KNOWN_ENDPOINT_METRICS, keyed by
+# _endpoint_key() instead of .lower(), so lookups are insensitive to
+# hyphen/space/underscore differences in the raw extracted endpoint name.
+ENDPOINT_ALIASES_BY_KEY = {_endpoint_key(k): v for k, v in ENDPOINT_ALIASES.items()}
+KNOWN_ENDPOINT_METRICS_BY_KEY = {_endpoint_key(k): v for k, v in KNOWN_ENDPOINT_METRICS.items()}
+
 
 def _is_atc_noise(name: str) -> bool:
     if name is None:
@@ -306,21 +325,21 @@ def merge_figure_data(result: dict, figure_data: dict) -> dict:
     if "parse_error" in result:
         return result
 
-    existing_endpoints_lower = {e.lower() for e in result.get("admet_endpoints_covered", [])}
+    existing_endpoints_key = {_endpoint_key(e) for e in result.get("admet_endpoints_covered", [])}
     for ep in figure_data.get("endpoints_from_figures", []):
         if _is_atc_noise(ep):
             continue
         ep = KNOWN_CORRECTIONS.get(ep, ep)
-        ep = ENDPOINT_ALIASES.get(ep.lower(), ep)
-        if ep.lower() not in existing_endpoints_lower:
+        ep = ENDPOINT_ALIASES_BY_KEY.get(_endpoint_key(ep), ep)
+        if _endpoint_key(ep) not in existing_endpoints_key:
             result["admet_endpoints_covered"].append(ep)
-            existing_endpoints_lower.add(ep.lower())
+            existing_endpoints_key.add(_endpoint_key(ep))
 
     existing_benchmarks = {
-        (b["endpoint"].lower(), b["metric"]) for b in result.get("benchmark_results", [])
+        (_endpoint_key(b["endpoint"]), b["metric"]) for b in result.get("benchmark_results", [])
     }
     existing_benchmark_endpoints = {
-        b["endpoint"].lower() for b in result.get("benchmark_results", [])
+        _endpoint_key(b["endpoint"]) for b in result.get("benchmark_results", [])
     }
     for b in figure_data.get("benchmark_results_from_figures", []):
         endpoint = b.get("endpoint")
@@ -328,16 +347,16 @@ def merge_figure_data(result: dict, figure_data: dict) -> dict:
         if _is_atc_noise(endpoint) or metric == "Frequency":
             continue
         endpoint = KNOWN_CORRECTIONS.get(endpoint, endpoint)
-        endpoint = ENDPOINT_ALIASES.get(endpoint.lower(), endpoint)
+        endpoint = ENDPOINT_ALIASES_BY_KEY.get(_endpoint_key(endpoint), endpoint)
         value = b.get("value")
         # A null-value figure result for an endpoint that already has a real
         # extracted number adds no information and only risks tagging on a
         # mis-guessed metric (e.g. TDC-conventional AUROC/MAE guessed by the
         # figure pass for a paper that actually reported Spearman/AUPRC) —
         # skip it rather than let it survive as contradictory noise.
-        if value is None and endpoint.lower() in existing_benchmark_endpoints:
+        if value is None and _endpoint_key(endpoint) in existing_benchmark_endpoints:
             continue
-        key = (endpoint.lower(), metric)
+        key = (_endpoint_key(endpoint), metric)
         if key not in existing_benchmarks:
             result["benchmark_results"].append({
                 "endpoint": endpoint,
@@ -347,7 +366,7 @@ def merge_figure_data(result: dict, figure_data: dict) -> dict:
                 "baseline_comparison": b.get("notes"),
             })
             existing_benchmarks.add(key)
-            existing_benchmark_endpoints.add(endpoint.lower())
+            existing_benchmark_endpoints.add(_endpoint_key(endpoint))
 
     if figure_data.get("figure_notes"):
         result.setdefault("figure_notes", []).extend(figure_data["figure_notes"])
@@ -356,16 +375,17 @@ def merge_figure_data(result: dict, figure_data: dict) -> dict:
 
 
 def normalize_result(result: dict) -> dict:
-    # Resolve corrections and aliases, then deduplicate admet_endpoints_covered case-insensitively.
-    seen_lower = set()
+    # Resolve corrections and aliases, then deduplicate admet_endpoints_covered,
+    # treating "Half-Life" / "Half Life" / "half_life" style variants as identical.
+    seen = set()
     deduped = []
     for ep in result.get("admet_endpoints_covered", []):
         ep = ep.strip()
         ep = KNOWN_CORRECTIONS.get(ep, ep)
-        canonical = ENDPOINT_ALIASES.get(ep.lower(), ep)
-        canonical_key = canonical.lower()
-        if canonical_key not in seen_lower:
-            seen_lower.add(canonical_key)
+        canonical = ENDPOINT_ALIASES_BY_KEY.get(_endpoint_key(ep), ep)
+        canonical_key = _endpoint_key(canonical)
+        if canonical_key not in seen:
+            seen.add(canonical_key)
             deduped.append(canonical)
     result["admet_endpoints_covered"] = deduped
 
@@ -375,11 +395,12 @@ def normalize_result(result: dict) -> dict:
     for b in result.get("benchmark_results", []):
         ep_raw = (b.get("endpoint") or "").strip()
         ep_raw = KNOWN_CORRECTIONS.get(ep_raw, ep_raw)
-        canonical = ENDPOINT_ALIASES.get(ep_raw.lower(), ep_raw)
+        canonical = ENDPOINT_ALIASES_BY_KEY.get(_endpoint_key(ep_raw), ep_raw)
         b["endpoint"] = canonical
-        if not b.get("metric") and canonical.lower() in KNOWN_ENDPOINT_METRICS:
-            b["metric"] = KNOWN_ENDPOINT_METRICS[canonical.lower()]
-        key = (canonical.lower(), b.get("metric"), str(b.get("value")), str(b.get("baseline_comparison")))
+        canonical_key = _endpoint_key(canonical)
+        if not b.get("metric") and canonical_key in KNOWN_ENDPOINT_METRICS_BY_KEY:
+            b["metric"] = KNOWN_ENDPOINT_METRICS_BY_KEY[canonical_key]
+        key = (canonical_key, b.get("metric"), str(b.get("value")), str(b.get("baseline_comparison")))
         if key not in seen_benchmarks:
             seen_benchmarks.add(key)
             deduped_benchmarks.append(b)
